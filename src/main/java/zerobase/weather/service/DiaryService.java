@@ -6,43 +6,96 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.time.LocalDate;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 import org.json.simple.parser.ParseException;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
+import zerobase.weather.domain.DateWeather;
 import zerobase.weather.domain.Diary;
+import zerobase.weather.repository.DateWeatherRepository;
 import zerobase.weather.repository.DiaryRepository;
 
 @Service
+@Transactional(readOnly = true)
 public class DiaryService {
+
+	private final DiaryRepository diaryRepository;
+	private final DateWeatherRepository dateWeatherRepository;
 
 	@Value("${openweathermap.key}")
 	private String apiKey;
 
-	private final DiaryRepository diaryRepository;
-
-	public DiaryService(DiaryRepository diaryRepository) {
+	public DiaryService(DiaryRepository diaryRepository,
+		DateWeatherRepository dateWeatherRepository) {
 		this.diaryRepository = diaryRepository;
+		this.dateWeatherRepository = dateWeatherRepository;
 	}
 
+	@Transactional
+	@Scheduled(cron = "0 0 1 * * *")
+	public void saveWeatherDate() {
+		dateWeatherRepository.save(getWeatherFromApi());
+	}
+
+	@Transactional(isolation = Isolation.SERIALIZABLE)
 	public void createDiary(String text, LocalDate date) {
+		DateWeather dateWeather = getDateWeather(date);
+		//파싱된 데이터 + 일기 값 우리 DB에 넣기
+		Diary nowDiary = new Diary();
+		nowDiary.setDateWeather(dateWeather);
+		nowDiary.setText(text);
+		nowDiary.setDate(date);
+		diaryRepository.save(nowDiary);
+	}
+
+	private DateWeather getWeatherFromApi() {
 		//open weather map에서 날씨 데이터 가져오기
 		String weatherData = getWeatherString();
 
 		//받아온 날씨 json 파싱하기
 		Map<String, Object> parsedWeather = parseWeather(weatherData);
+		DateWeather dateWeather = new DateWeather();
+		dateWeather.setWeather(parsedWeather.get("main").toString());
+		dateWeather.setIcon(parsedWeather.get("icon").toString());
+		dateWeather.setTemperature((Double) parsedWeather.get("temp"));
+		dateWeather.setDate(LocalDate.now());
+		return dateWeather;
+	}
 
-		//파싱된 데이터 + 일기 값 우리 DB에 넣기
-		Diary nowDiary = new Diary();
-		nowDiary.setWeather(parsedWeather.get("main").toString());
-		nowDiary.setIcon(parsedWeather.get("icon").toString());
-		nowDiary.setTemperature((Double) parsedWeather.get("temp"));
+	private DateWeather getDateWeather(LocalDate date){
+		List<DateWeather> dateWeatherListFromDB = dateWeatherRepository.findByDate(date);
+		if(dateWeatherListFromDB.size()==0){
+			//새로 api에서 날씨 정보를 가져와야함
+			//정책상 현재 날씨를 가져오도록 하거나 날씨 없이 일기를 써야함
+			return getWeatherFromApi();
+		}
+		return dateWeatherListFromDB.get(0);
+	}
+
+	@Transactional(readOnly = true)
+	public List<Diary> readDiary(LocalDate date) {
+		return diaryRepository.findAllByDate(date);
+	}
+
+	public List<Diary> readDiaries(LocalDate startDate, LocalDate endDate) {
+		return diaryRepository.findAllByDateBetween(startDate, endDate);
+	}
+
+	public void updateDiary(LocalDate date, String text) {
+		Diary nowDiary = diaryRepository.getFirstByDate(date);
 		nowDiary.setText(text);
-		nowDiary.setDate(date);
 		diaryRepository.save(nowDiary);
+	}
+
+	public void deleteDiary(LocalDate date) {
+		diaryRepository.deleteAllByDate(date);
 	}
 
 	private String getWeatherString() {
@@ -83,8 +136,8 @@ public class DiaryService {
 		Map<String, Object> resultMap = new HashMap<>();
 		JSONObject mainData = (JSONObject) jsonObject.get("main");
 		resultMap.put("temp", mainData.get("temp"));
-		JSONArray weatherArray =(JSONArray)jsonObject.get("weather");
-		JSONObject weatherData = (JSONObject)weatherArray.get(0);
+		JSONArray weatherArray = (JSONArray) jsonObject.get("weather");
+		JSONObject weatherData = (JSONObject) weatherArray.get(0);
 		resultMap.put("main", weatherData.get("main"));
 		resultMap.put("icon", weatherData.get("icon"));
 		return resultMap;
